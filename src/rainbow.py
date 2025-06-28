@@ -1,26 +1,81 @@
-from ChefsHatPlayersClub.agents.classic.dql import AgentDQL
-from ChefsHatPlayersClub.agents.util.memory_buffer import MemoryBuffer
-
-from ChefsHatGym.agents.base_classes.chefs_hat_player import ChefsHatPlayer
-from ChefsHatGym.rewards.only_winning import RewardOnlyWinning
-
-import keras
-from keras import Model
-from keras.layers import Input, Dense, Lambda, Multiply
-import keras.backend as K
-from keras.optimizers import Adam
-from keras.models import load_model
-
+import copy
 import os
 import sys
 import urllib.request
-import random
-import numpy
-import copy
+from types import MethodType
 from typing import Literal
 
+import keras.backend as K
+import numpy
 import tensorflow as tf
+from ChefsHatGym.agents.base_classes.chefs_hat_player import ChefsHatPlayer
+from ChefsHatGym.rewards.only_winning import RewardOnlyWinning
+from ChefsHatPlayersClub.agents.classic.dql import AgentDQL
+from ChefsHatPlayersClub.agents.util.memory_buffer import MemoryBuffer
+from keras import Model
+from keras.layers import Input, Dense, Lambda, Multiply
+from keras.models import load_model
+from keras.optimizers import Adam
 from keras.src.layers import Add
+
+# Retrieve the actual SumTree class the buffer instantiates
+SumTreeClass = type(MemoryBuffer(1, True).buffer)
+
+def _count(self):
+    return self.write          # works for both PER and vanilla
+
+SumTreeClass.count = MethodType(_count, SumTreeClass)
+
+# ── Patch MemoryBuffer.sample_batch at runtime ───────────────────────────────
+import random, numpy as np
+from ChefsHatPlayersClub.agents.util.memory_buffer import MemoryBuffer
+
+def _sample_batch_fixed(self, batch_size):
+    batch = []
+
+    # ------- Prioritized Experience Replay branch ---------------------------
+    if self.with_per:
+        total_p = self.buffer.total()
+        if total_p == 0:                     # buffer not initialised yet
+            raise ValueError("SumTree total priority is zero – no samples to draw")
+        segment = total_p / batch_size       # ← TRUE division fixes the bug
+
+        idx_list = []
+        for i in range(batch_size):
+            a = segment * i
+            b = segment * (i + 1)
+            s = random.uniform(a, b)
+            idx, _, data = self.buffer.get(s)
+            batch.append((*data, idx))
+            idx_list.append(idx)
+
+        idx = np.array(idx_list, dtype=np.int32)
+
+    # ------- Standard replay branch ----------------------------------------
+    elif self.count < batch_size:
+        idx = None
+        batch = random.sample(self.buffer, self.count)
+    else:
+        idx = None
+        batch = random.sample(self.buffer, batch_size)
+
+    # ------- Reformat for the agent ----------------------------------------
+    s_batch            = np.array([e[0] for e in batch])
+    a_batch            = np.array([e[1] for e in batch])
+    r_batch            = np.array([e[2] for e in batch])
+    d_batch            = np.array([e[3] for e in batch])
+    new_s_batch        = np.array([e[4] for e in batch])
+    possibleActions    = np.array([e[5] for e in batch])
+    newPossibleActions = np.array([e[6] for e in batch])
+
+    return (s_batch, a_batch, r_batch, d_batch,
+            new_s_batch, possibleActions, newPossibleActions, idx)
+
+# Attach the fixed method
+MemoryBuffer.sample_batch = _sample_batch_fixed
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 
 tf.experimental.numpy.experimental_enable_numpy_behavior()
 
@@ -37,7 +92,7 @@ class AgentRainbow(ChefsHatPlayer):
     training = False
 
     loadFrom = {
-        "vsRandom": "/Users/macbook/PycharmProjects/CardPlayingRobot/temp/per/Rainbow_DQL_vsRandom_VanillaDuelingDQNEpisode2/savedModel/actor_PlayerRainbow_DQL_vsRandom_VanillaDuelingDQNEpisode2.keras",
+        "vsRandom": "/Users/macbook/PycharmProjects/CardPlayingRobot/temp/per/Rainbow_DQL_vsRandom_SelfGeneration500PerDuelingDQNEpisode1/savedModel/actor_PlayerRainbow_DQL_vsRandom_SelfGeneration500PerDuelingDQNEpisode1.keras",
         "vsEveryone": "Trained/dql_vsEveryone.hd5",
         "vsSelf": "Trained/dql_vsSelf.hd5",
     }
@@ -144,8 +199,8 @@ class AgentRainbow(ChefsHatPlayer):
             self.epsilon = 0.0  # no exploration while testing
 
         # behavior parameters
-        self.prioritized_experience_replay = False
-        self.dueling = False
+        self.prioritized_experience_replay = True
+        self.dueling = True
 
         QSize = 20000
         self.memory = MemoryBuffer(QSize, self.prioritized_experience_replay)
@@ -217,20 +272,19 @@ class AgentRainbow(ChefsHatPlayer):
         self.actor = model()
         self.targetNetwork = model()
 
-    def loadModel(self, model):
-        # don’t try to rebuild the saved optimizer
-        self.actor = load_model(model, compile=False)
-        self.targetNetwork = load_model(model, compile=False)
+    def loadModel(self, actorModel,targetModel=""):
+        """
+        Load a saved .keras / .h5 model that contains Lambda layers.
+        Sets safe_mode=False to allow deserialization.
+        """
+        targetModel = "/Users/macbook/PycharmProjects/CardPlayingRobot/temp/per/Rainbow_DQL_vsRandom_SelfGeneration500PerDuelingDQNEpisode1/savedModel/target_PlayerRainbow_DQL_vsRandom_SelfGeneration500PerDuelingDQNEpisode1.keras"
+        # 1) load both networks
+        self.actor = load_model(actorModel, compile=False, safe_mode=False)
+        self.targetNetwork = load_model(targetModel, compile=False, safe_mode=False)
 
-        # then re-compile with whatever optimizer/loss you need
-        self.actor.compile(
-            optimizer="adam",
-            loss="mse"
-        )
-        self.targetNetwork.compile(
-            optimizer="adam",
-            loss="mse"
-        )
+        # 2) re-compile
+        self.actor.compile(optimizer="adam", loss="mse")
+        self.targetNetwork.compile(optimizer="adam", loss="mse")
 
     def updateTargetNetwork(self):
         W = self.actor.get_weights()
@@ -283,35 +337,54 @@ class AgentRainbow(ChefsHatPlayer):
         )
 
     def memorize(
-        self,
-        state,
-        action,
-        reward,
-        next_state,
-        done,
-        possibleActions,
-        newPossibleActions,
-    ):
-        if self.prioritized_experience_replay:
-            state = numpy.expand_dims(numpy.array(state), 0)
-            next_state = numpy.expand_dims(numpy.array(next_state), 0)
-            q_val = self.actor(state)
-            q_val_t = self.targetNetwork(next_state)
-            next_best_action = numpy.argmax(q_val)
-            new_val = reward + self.gamma * q_val_t[0, next_best_action]
-            td_error = abs(new_val - q_val)[0]
-        else:
-            td_error = 0
-
-        self.memory.memorize(
+            self,
             state,
             action,
             reward,
-            done,
             next_state,
+            done,
             possibleActions,
             newPossibleActions,
-            td_error,
+    ):
+        """
+        Add a transition to the replay buffer.  If using PER, compute the
+        initial priority from the TD-error; otherwise use zero.
+        """
+        if self.prioritized_experience_replay:
+            # 1) Prepare 2D inputs for the networks
+            state_t = np.expand_dims(np.asarray(state, dtype=np.float32), 0)
+            next_t = np.expand_dims(np.asarray(next_state, dtype=np.float32), 0)
+            mask_t = np.expand_dims(np.asarray(possibleActions, dtype=np.float32), 0)
+            next_mask_t = np.expand_dims(np.asarray(newPossibleActions, dtype=np.float32), 0)
+
+            # 2) Compute Q(s,·) and Q'(s',·)
+            q_val = self.actor([state_t, mask_t])
+            q_next_targ = self.targetNetwork([next_t, next_mask_t])
+
+            # 3) Double-DQN: pick next action from online net
+            best_next = np.argmax(self.actor([next_t, next_mask_t]))
+
+            # 4) Build target and TD-error
+            target = reward + self.gamma * (1 - done) * q_next_targ[0, best_next]
+            td_error = abs(target - q_val[0, action])
+
+            # Wrap in a 1-element array so memory_buffer.priority(error[0]) works
+            per_error = np.array([td_error], dtype=np.float32)
+        else:
+            # No PER → dummy zero error
+            per_error = np.array([0.0], dtype=np.float32)
+
+        # 5) **CRITICAL**: actually write into the buffer!
+        #    Signature: (state, action, reward, done, next_state, mask, next_mask, error)
+        self.memory.memorize(
+            state,  # s
+            action,  # a
+            reward,  # r
+            done,  # d
+            next_state,  # s'
+            possibleActions,  # mask(s)
+            newPossibleActions,  # mask(s')
+            per_error  # initial TD-error for PER
         )
 
     # Agent Chefs Hat Functions
@@ -406,19 +479,52 @@ class AgentRainbow(ChefsHatPlayer):
             )
 
     def update_end_match(self, info):
-        if self.training:
-            rounds = info["Rounds"]
-            thisPlayer = info["Author_Index"]
-            if self.memory.size() > self.batchSize:
-                self.updateModel(rounds, thisPlayer)
-                self.updateTargetNetwork()
+        if not self.training:
+            return
 
-                keras.models.save_model(
-                    self.targetNetwork,
-                    os.path.join(
-                        self.save_model,
-                        "actor_Player" + str(self.name) + ".keras",
-                    ),
-                )
-                if self.epsilon > self.epsilon_min:
-                    self.epsilon *= self.epsilon_decay
+        # 1) Log current memory size
+        current_mem = self.memory.size()
+        self.log(f"-- {self.name}: Memory size before update: {current_mem}")
+
+        # 2) Only train once we have enough samples
+        if current_mem > self.batchSize:
+            # — Train & update target
+            self.updateModel(info["Rounds"], info["Author_Index"])
+            self.updateTargetNetwork()
+
+            os.makedirs(self.save_model, exist_ok=True)
+
+            # 3) Save the actor network in Keras format
+            actor_path = os.path.join(
+                self.save_model,
+                f"actor_Player{self.name}.keras"
+            )
+            try:
+                self.actor.save(actor_path)  # .keras → Keras native format
+                self.log(f"✅ {self.name}: Saved actor model to {actor_path}")
+            except Exception as e:
+                self.log(f"❌ {self.name}: Failed to save actor model: {e}")
+
+            # 4) Save the target network in Keras format
+            target_path = os.path.join(
+                self.save_model,
+                f"target_Player{self.name}.keras"
+            )
+            try:
+                self.targetNetwork.save(target_path)
+                self.log(f"✅ {self.name}: Saved target model to {target_path}")
+            except Exception as e:
+                self.log(f"❌ {self.name}: Failed to save target model: {e}")
+
+            # 5) Decay exploration epsilon
+            if self.epsilon > self.epsilon_min:
+                old_eps = self.epsilon
+                self.epsilon *= self.epsilon_decay
+                self.log(f"-- {self.name}: Epsilon decayed {old_eps:.4f} → {self.epsilon:.4f}")
+        else:
+            # Still gathering enough experiences
+            self.log(
+                f"-- {self.name}: Not enough memory to train "
+                f"(have {current_mem}, need > {self.batchSize})"
+            )
+

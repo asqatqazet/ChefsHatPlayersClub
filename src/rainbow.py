@@ -17,12 +17,15 @@ from keras.layers import Input, Dense, Lambda, Multiply
 from keras.models import load_model
 from keras.optimizers import Adam
 from keras.src.layers import Add
+from tensorflow.python.keras.layers import Reshape
 
 # Retrieve the actual SumTree class the buffer instantiates
 SumTreeClass = type(MemoryBuffer(1, True).buffer)
 
+
 def _count(self):
-    return self.write          # works for both PER and vanilla
+    return self.write  # works for both PER and vanilla
+
 
 SumTreeClass.count = MethodType(_count, SumTreeClass)
 
@@ -33,25 +36,29 @@ from ChefsHatPlayersClub.agents.util.memory_buffer import MemoryBuffer
 def _sample_batch_fixed(self, batch_size):
     batch = []
 
-    # ------- Prioritized Experience Replay branch ---------------------------
     if self.with_per:
         total_p = self.buffer.total()
-        if total_p == 0:                     # buffer not initialised yet
+        if total_p == 0:
             raise ValueError("SumTree total priority is zero – no samples to draw")
-        segment = total_p / batch_size       # ← TRUE division fixes the bug
 
+        segment = total_p / float(batch_size)
         idx_list = []
+
         for i in range(batch_size):
-            a = segment * i
-            b = segment * (i + 1)
+            a, b = segment * i, segment * (i + 1)
             s = random.uniform(a, b)
+
             idx, _, data = self.buffer.get(s)
+
+            # NEW ↓↓↓ dereference if needed
+            if isinstance(data, (int, np.integer)):
+                data = self.buffer.data[data]
+
             batch.append((*data, idx))
             idx_list.append(idx)
 
         idx = np.array(idx_list, dtype=np.int32)
 
-    # ------- Standard replay branch ----------------------------------------
     elif self.count < batch_size:
         idx = None
         batch = random.sample(self.buffer, self.count)
@@ -59,7 +66,7 @@ def _sample_batch_fixed(self, batch_size):
         idx = None
         batch = random.sample(self.buffer, batch_size)
 
-    # ------- Reformat for the agent ----------------------------------------
+    # unpack to numpy arrays -------------------------------------------------
     s_batch            = np.array([e[0] for e in batch])
     a_batch            = np.array([e[1] for e in batch])
     r_batch            = np.array([e[2] for e in batch])
@@ -71,10 +78,10 @@ def _sample_batch_fixed(self, batch_size):
     return (s_batch, a_batch, r_batch, d_batch,
             new_s_batch, possibleActions, newPossibleActions, idx)
 
+
 # Attach the fixed method
 MemoryBuffer.sample_batch = _sample_batch_fixed
 # ─────────────────────────────────────────────────────────────────────────────
-
 
 
 tf.experimental.numpy.experimental_enable_numpy_behavior()
@@ -83,7 +90,6 @@ types = ["Scratch", "vsRandom", "vsEveryone", "vsSelf"]
 
 
 class AgentRainbow(ChefsHatPlayer):
-
     # _TYPES: Literal["Scratch", "vsRandom", "vsEveryone", "vsSelf"]
 
     suffix = "Rainbow_DQL"
@@ -91,8 +97,20 @@ class AgentRainbow(ChefsHatPlayer):
     targetNetwork = None
     training = False
 
+    N_ATOMS = 51
+
+    # Minimum and maximum supports for the return distribution
+    V_MIN = -00.0
+    V_MAX = 10.0
+
+    # Atom spacing Δz = (V_MAX - V_MIN) / (N_ATOMS - 1)
+    delta_z = (V_MAX - V_MIN) / float(N_ATOMS - 1)
+
+    # The fixed tensor of atom locations: shape = (N_ATOMS,)
+    z = tf.linspace(V_MIN, V_MAX, N_ATOMS)
+
     loadFrom = {
-        "vsRandom": "/Users/macbook/PycharmProjects/CardPlayingRobot/temp/per/Rainbow_DQL_vsRandom_SelfGeneration500PerDuelingDQNEpisode1/savedModel/actor_PlayerRainbow_DQL_vsRandom_SelfGeneration500PerDuelingDQNEpisode1.keras",
+        "vsRandom": "/Users/macbook/PycharmProjects/CardPlayingRobot/temp/per/Rainbow_DQL_vsRandom_51PerDuelingDQNEpisode5/savedModel/actor_PlayerRainbow_DQL_vsRandom_51PerDuelingDQNEpisode5.keras",
         "vsEveryone": "Trained/dql_vsEveryone.hd5",
         "vsSelf": "Trained/dql_vsSelf.hd5",
     }
@@ -106,16 +124,16 @@ class AgentRainbow(ChefsHatPlayer):
     # self, a: int, b: str, c: float, type_: Literal["solar", "view", "both"] = "solar"):
 
     def __init__(
-        self,
-        name: str,
-        continueTraining: bool = False,
-        agentType: Literal["Scratch", "vsRandom", "vsEveryone", "vsSelf"] = "Scratch",
-        initialEpsilon: float = 1,
-        loadNetwork: str = "",
-        saveFolder: str = "",
-        verbose_console: bool = False,
-        verbose_log: bool = False,
-        log_directory: str = "",
+            self,
+            name: str,
+            continueTraining: bool = False,
+            agentType: Literal["Scratch", "vsRandom", "vsEveryone", "vsSelf"] = "Scratch",
+            initialEpsilon: float = 1,
+            loadNetwork: str = "",
+            saveFolder: str = "",
+            verbose_console: bool = False,
+            verbose_log: bool = False,
+            log_directory: str = "",
     ):
         super().__init__(
             self.suffix,
@@ -128,7 +146,7 @@ class AgentRainbow(ChefsHatPlayer):
 
         if continueTraining:
             assert (
-                log_directory != ""
+                    log_directory != ""
             ), "When training an agent, you have to define a log_directory!"
 
             self.save_model = os.path.join(self.this_log_folder, "savedModel")
@@ -153,15 +171,15 @@ class AgentRainbow(ChefsHatPlayer):
             )
 
             if not os.path.exists(
-                os.path.join(
-                    os.path.abspath(sys.modules[AgentDQL.__module__].__file__)[0:-6],
-                    "Trained",
-                )
+                    os.path.join(
+                        os.path.abspath(sys.modules[AgentDQL.__module__].__file__)[0:-6],
+                        "Trained",
+                    )
             ):
                 os.mkdir(
                     os.path.join(
                         os.path.abspath(sys.modules[AgentDQL.__module__].__file__)[
-                            0:-6
+                        0:-6
                         ],
                         "Trained",
                     )
@@ -213,27 +231,22 @@ class AgentRainbow(ChefsHatPlayer):
     def buildModel(self):
         self.buildSimpleModel()
 
-        self.actor.compile(
-            loss=self.loss,
-            optimizer=Adam(learning_rate=self.learning_rate),
-            metrics=["mse"],
-        )
-
-        self.targetNetwork.compile(
-            loss=self.loss,
-            optimizer=Adam(learning_rate=self.learning_rate),
-            metrics=["mse"],
-        )
+        self.actor.compile(optimizer=Adam(self.learning_rate),
+                           loss='categorical_crossentropy')  # ← CE between dists
+        self.targetNetwork.compile(optimizer=Adam(self.learning_rate),
+                                   loss='categorical_crossentropy')
 
     def buildSimpleModel(self):
         """Build Deep Q-Network"""
 
         def model():
 
+            global probs_masked
             inputSize = 28
             actionSize = self.outputSize
 
-            state_input = Input(shape=(inputSize,), name="State") # 5 cards in the player's hand + maximum 4 cards in current board
+            state_input = Input(shape=(inputSize,),
+                                name="State")  # 5 cards in the player's hand + maximum 4 cards in current board
             action_mask = Input(shape=(actionSize,), name="PossibleActions")
 
             # ── Shared hidden layers ───────────────────────────────────────────────
@@ -244,40 +257,39 @@ class AgentRainbow(ChefsHatPlayer):
                           name=f"Dense_shared_{i}")(x)
             if self.dueling:
                 # ── Value stream ──────────────────────────────────────────────────
-                V = Dense(1,
-                          activation="linear",
-                          name="Value")(x)  # shape = (batch, 1)
+                V_logits = Dense(AgentRainbow.N_ATOMS, name="V_logits")(x)  # ⇒ v(s)   (B , N)
+                A_logits = Dense(actionSize * AgentRainbow.N_ATOMS, name="A_logits")(x)  # ⇒ concat of a(s,a)
+                A_logits = Reshape((actionSize, AgentRainbow.N_ATOMS))(A_logits)  # (B , A , N)
 
                 # ── Advantage stream ─────────────────────────────────────────────
-                A = Dense(actionSize,
-                          activation="linear",
-                          name="Advantage")(x)  # shape = (batch, actionSize)
-                A = Lambda(
-                    lambda a: a - K.mean(a, axis=1, keepdims=True),
-                    output_shape=(actionSize,),
-                    name="AdvantageCentered"
-                )(A)
-                Q = Add(name="Q_values")([V, A])
+
+                A_centered = Lambda(lambda a: a - K.mean(a, axis=1, keepdims=True),
+                                    name="A_centered")(A_logits)  # eq. (1)
+
+                logits = Add()([tf.expand_dims(V_logits, 1), A_centered])
+                # logits shape = (B , A , N)   implements the boxed equation
 
             else:
-                # ── Standard (non-dueling) single head Q ───────────────────────
-                Q = Dense(actionSize,
-                          activation="linear",
-                          name="Q_values")(x)
+                logits = Dense(actionSize * AgentRainbow.N_ATOMS,
+                               name="C51_logits")(x)
+                logits = Reshape((actionSize, AgentRainbow.N_ATOMS))(logits)
 
-            Q_masked = Multiply(name="Masked_Q")([action_mask, Q])
+            probs = tf.nn.softmax(logits, axis=-1)  # eq. (2)
 
-            return Model([state_input, action_mask], Q_masked)
+            mask3d = Lambda(lambda m: tf.expand_dims(tf.cast(m, tf.float32), -1))(action_mask)
+            probs_masked = Multiply()([mask3d, probs])
+
+            return Model([state_input, action_mask], probs_masked)
 
         self.actor = model()
         self.targetNetwork = model()
 
-    def loadModel(self, actorModel,targetModel=""):
+    def loadModel(self, actorModel, targetModel=""):
         """
         Load a saved .keras / .h5 model that contains Lambda layers.
         Sets safe_mode=False to allow deserialization.
         """
-        targetModel = "/Users/macbook/PycharmProjects/CardPlayingRobot/temp/per/Rainbow_DQL_vsRandom_SelfGeneration500PerDuelingDQNEpisode1/savedModel/target_PlayerRainbow_DQL_vsRandom_SelfGeneration500PerDuelingDQNEpisode1.keras"
+        targetModel = "/Users/macbook/PycharmProjects/CardPlayingRobot/temp/per/Rainbow_DQL_vsRandom_51PerDuelingDQNEpisode5/savedModel/actor_PlayerRainbow_DQL_vsRandom_51PerDuelingDQNEpisode5.keras"
         # 1) load both networks
         self.actor = load_model(actorModel, compile=False, safe_mode=False)
         self.targetNetwork = load_model(targetModel, compile=False, safe_mode=False)
@@ -293,99 +305,129 @@ class AgentRainbow(ChefsHatPlayer):
             tgt_W[i] = self.tau * W[i] + (1 - self.tau) * tgt_W[i]
         self.targetNetwork.set_weights(tgt_W)
 
-    def updateModel(self, game, thisPlayer):
-        """Train Q-network on batch sampled from the buffer"""
-        # Sample experience from memory buffer (optionally with PER)
-        (
-            s,
-            a,
-            r,
-            d,
-            new_s,
-            possibleActions,
-            newPossibleActions,
-            idx,
-        ) = self.memory.sample_batch(self.batchSize)
+    def updateModel(self, *_):
+        (s, a, r, d, ns, mask, nmask, idx) = \
+            self.memory.sample_batch(self.batchSize)
 
-        # Apply Bellman Equation on batch samples to train our DDQN
-        q = self.actor([s, possibleActions]).numpy()
-        next_q = self.actor([new_s, newPossibleActions]).numpy()
-        q_targ = self.targetNetwork([new_s, newPossibleActions]).numpy()
+        # --- forward passes ----------------------------------------------------
+        dist_next = self.targetNetwork([ns, nmask])  # (B , A , N)
+        q_next_onl = self._expectation(self.actor([ns, nmask]))
+        a_star = tf.argmax(q_next_onl, axis=-1)  # best act by online
+        batch_idx = tf.range(self.batchSize, dtype=tf.int64)
+        dist_next_a = tf.gather_nd(dist_next,
+                                   tf.stack([batch_idx, a_star], axis=1))  # (B , N)
 
-        for i in range(s.shape[0]):
-            old_q = q[i, a[i]]
-            if d[i]:
-                q[i, a[i]] = r[i]
-            else:
-                next_best_action = numpy.argmax(next_q[i, :])
-                q[i, a[i]] = r[i] + self.gamma * q_targ[i, next_best_action]
+        # --- build target distribution ----------------------------------------
+        target_dist = self._project(r, d, dist_next_a)  # (B , N)
 
-            if self.prioritized_experience_replay:
-                # Update PER Sum Tree
-                self.memory.update(idx[i], abs(old_q - q[i, a[i]]))
+        # --- y_true with one-hot over actions -------------------------------
+        y_true = tf.one_hot(a, self.outputSize)[:, :, None] * target_dist[:, None, :]
 
-        # Train on batch
-        history = self.actor.fit([s, possibleActions], q, verbose=True)
+        # --- train step ---------------------------------------------------------
+        self.actor.train_on_batch([s, mask], y_true)
 
-        self.log(
-            "-- "
-            + self.name
-            + ": Epsilon:"
-            + str(self.epsilon)
-            + " - Loss:"
-            + str(history.history["loss"])
-        )
+        # --- PER priority update ------------------------------------------------
+        if self.prioritized_experience_replay:
+            pred_dist = self.actor([s, mask])  # (B , A , N)
+            pred_a = tf.gather_nd(pred_dist,
+                                  tf.stack([batch_idx, a], axis=1))  # (B , N)
+            kl = tf.reduce_sum(target_dist *
+                               tf.math.log((target_dist + 1e-8) / (pred_a + 1e-8)), axis=-1)
+            for i in range(self.batchSize):
+                self.memory.update(idx[i], float(kl[i]))
 
-    def memorize(
-            self,
+    # ---------------------------------------------------------------------------
+    #   DROP-IN REPLACEMENT FOR AgentRainbow.memorize
+    # ---------------------------------------------------------------------------
+    def memorize(self,
+                 state, action, reward, next_state, done,
+                 possibleActions, newPossibleActions, error=None):
+        """
+        Stores a transition in the replay buffer.
+        If PER is enabled `error` is the KL-priority; otherwise 0.
+        """
+
+        # --------- 1. Compute PER priority (KL divergence) --------------------
+        if self.prioritized_experience_replay:
+            # -- format inputs as 1-batch tensors
+            s_t = np.expand_dims(np.asarray(state, np.float32), 0)
+            ns_t = np.expand_dims(np.asarray(next_state, np.float32), 0)
+            m_t = np.expand_dims(np.asarray(possibleActions, np.float32), 0)
+            nm_t = np.expand_dims(np.asarray(newPossibleActions, np.float32), 0)
+
+            # -- distributions
+            dist_pred = self.actor([s_t, m_t])[0]  # pθ(s,·)
+            dist_next_o = self.actor([ns_t, nm_t])[0]  # pθ(s',·)
+            dist_next_t = self.targetNetwork([ns_t, nm_t])[0]  # pθ⁻(s',·)
+
+            # -- best next action by expected return
+            q_next = np.sum(self.z.numpy() * dist_next_o, axis=-1)
+            q_next[newPossibleActions == 0] = -1e9
+            a_star = int(np.argmax(q_next))
+
+            # -- Φ-projection target distribution
+            target_dist = self._project(
+                np.asarray([reward], np.float32),
+                np.asarray([done], np.float32),
+                tf.expand_dims(dist_next_t[a_star], 0)
+            )[0].numpy()  # (N,)
+
+            # -- prediction of the action actually taken
+            p_sa = dist_pred[action]  # (N,)
+            kl = np.sum(target_dist *
+                        np.log((target_dist + 1e-8) / (p_sa + 1e-8)))
+            per_error = np.array([kl], dtype=np.float32)
+        else:
+            per_error = 0.0  # vanilla replay
+
+        # --------- 2. Single call to the buffer ------------------------------
+        self.memory.memorize(
             state,
             action,
             reward,
-            next_state,
             done,
+            next_state,
             possibleActions,
             newPossibleActions,
-    ):
-        """
-        Add a transition to the replay buffer.  If using PER, compute the
-        initial priority from the TD-error; otherwise use zero.
-        """
-        if self.prioritized_experience_replay:
-            # 1) Prepare 2D inputs for the networks
-            state_t = np.expand_dims(np.asarray(state, dtype=np.float32), 0)
-            next_t = np.expand_dims(np.asarray(next_state, dtype=np.float32), 0)
-            mask_t = np.expand_dims(np.asarray(possibleActions, dtype=np.float32), 0)
-            next_mask_t = np.expand_dims(np.asarray(newPossibleActions, dtype=np.float32), 0)
-
-            # 2) Compute Q(s,·) and Q'(s',·)
-            q_val = self.actor([state_t, mask_t])
-            q_next_targ = self.targetNetwork([next_t, next_mask_t])
-
-            # 3) Double-DQN: pick next action from online net
-            best_next = np.argmax(self.actor([next_t, next_mask_t]))
-
-            # 4) Build target and TD-error
-            target = reward + self.gamma * (1 - done) * q_next_targ[0, best_next]
-            td_error = abs(target - q_val[0, action])
-
-            # Wrap in a 1-element array so memory_buffer.priority(error[0]) works
-            per_error = np.array([td_error], dtype=np.float32)
-        else:
-            # No PER → dummy zero error
-            per_error = np.array([0.0], dtype=np.float32)
-
-        # 5) **CRITICAL**: actually write into the buffer!
-        #    Signature: (state, action, reward, done, next_state, mask, next_mask, error)
-        self.memory.memorize(
-            state,  # s
-            action,  # a
-            reward,  # r
-            done,  # d
-            next_state,  # s'
-            possibleActions,  # mask(s)
-            newPossibleActions,  # mask(s')
-            per_error  # initial TD-error for PER
+            per_error
         )
+
+    def _project(self, rewards, dones, next_dist):
+        # ensure everything’s in float32
+        next_dist = tf.cast(next_dist, tf.float32)
+        rewards = tf.cast(rewards, tf.float32)
+        dones = tf.cast(dones, tf.float32)
+
+        BATCH = tf.shape(rewards)[0]
+        z = tf.expand_dims(self.z, 0)  # make sure self.z is a float32 numpy array or tf.constant
+        Tz = tf.expand_dims(rewards, 1) \
+             + self.gamma * tf.expand_dims(1 - dones, 1) * z
+        Tz = tf.clip_by_value(Tz, self.V_MIN, self.V_MAX)
+
+        b = (Tz - self.V_MIN) / self.delta_z
+        b = tf.cast(b, tf.float32)  # force float32
+
+        l = tf.cast(tf.floor(b), tf.int32)
+        u = tf.cast(tf.math.ceil(b), tf.int32)
+
+        offset = tf.expand_dims(tf.range(BATCH) * self.N_ATOMS, 1)
+
+        m = tf.zeros((BATCH * self.N_ATOMS,), dtype=tf.float32)
+
+        # scatter lower mass
+        m = tf.tensor_scatter_nd_add(
+            m,
+            tf.reshape(l + offset, (-1, 1)),
+            tf.reshape(next_dist * (tf.cast(u, tf.float32) - b), (-1,))
+        )
+        # scatter upper mass
+        m = tf.tensor_scatter_nd_add(
+            m,
+            tf.reshape(u + offset, (-1, 1)),
+            tf.reshape(next_dist * (b - tf.cast(l, tf.float32)), (-1,))
+        )
+
+        return tf.reshape(m, (BATCH, self.N_ATOMS))
 
     # Agent Chefs Hat Functions
 
@@ -396,30 +438,38 @@ class AgentRainbow(ChefsHatPlayer):
     def do_special_action(self, info, specialAction):
         return True
 
+    def _expectation(self, dist):  # dist (B , A , N)
+        return tf.reduce_sum(dist * self.z, axis=-1)  # (B , A)
+
     def get_action(self, observations):
-        stateVector = numpy.concatenate((observations[0:11], observations[11:28]))
-        possibleActions = observations[28:]
+        # ----- 2.1 split observation -------------------------------------------
+        state_vec = np.concatenate((observations[0:11], observations[11:28]))  # (28,)
+        legal = np.asarray(observations[28:], dtype=np.float32)  # (200,)
 
-        stateVector = numpy.expand_dims(stateVector, 0)
-        possibleActions = numpy.array(possibleActions)
+        # batchify
+        state_vec = state_vec[None, :]  # (1 , 28)
+        legal2d = legal[None, :]  # (1 , 200)
 
-        possibleActions2 = copy.copy(possibleActions)
+        # ----- 2.2 forward pass: distribution ----------------------------------
+        dist = self.actor([state_vec, legal2d])[0]  # (A , N)    p_{a,i}
 
-        if numpy.random.rand() <= self.epsilon:
-            itemindex = numpy.array(numpy.where(numpy.array(possibleActions2) == 1))[
-                0
-            ].tolist()
-            random.shuffle(itemindex)
-            aIndex = itemindex[0]
-            a = numpy.zeros(200)
-            a[aIndex] = 1
+        # ----- 2.3 expectation (eq. 3) -----------------------------------------
+        q = np.sum(self.z.numpy() * dist, axis=-1)  # (A,)
 
+        # mask illegal actions by −∞ so they are never chosen greedily
+        q[legal == 0] = -1e9
+
+        # ----- 2.4 ε–greedy decision (eq. 7) -----------------------------------
+        if np.random.rand() < self.epsilon:
+            # choose uniformly from legal indices
+            a_idx = int(np.random.choice(np.where(legal == 1)[0]))
         else:
-            possibleActionsVector = numpy.expand_dims(numpy.array(possibleActions2), 0)
+            a_idx = int(np.argmax(q))
 
-            a = self.actor([stateVector, possibleActionsVector])[0]
-
-        return numpy.array(a)
+        # ----- 2.5 return one-hot vector as before ------------------------------
+        one_hot = np.zeros(self.outputSize, dtype=np.float32)
+        one_hot[a_idx] = 1.0
+        return one_hot
 
     def get_reward(self, info):
         roles = {"Chef": 0, "Souschef": 1, "Waiter": 2, "Dishwasher": 3}
@@ -450,7 +500,6 @@ class AgentRainbow(ChefsHatPlayer):
 
     def update_my_action(self, info):
         if self.training:
-
             action = info["Action_Index"]
             observation = numpy.array(info["Observation_Before"])
             nextObservation = numpy.array(info["Observation_After"])
@@ -527,4 +576,3 @@ class AgentRainbow(ChefsHatPlayer):
                 f"-- {self.name}: Not enough memory to train "
                 f"(have {current_mem}, need > {self.batchSize})"
             )
-
